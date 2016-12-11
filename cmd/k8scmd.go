@@ -22,6 +22,7 @@ import (
 	"strings"
 	"bytes"
 	"github.com/sosozhuang/gocomponent/k8s"
+	"os"
 )
 
 var f k8s.RunFunc
@@ -30,7 +31,7 @@ var f k8s.RunFunc
 var k8sCmd = &cobra.Command{
 	Use:   "k8s",
 	Short: "A simple client for kubernetes",
-	PersistentPreRun: checkK8s,
+	PersistentPreRun: checkK8sCmd,
 }
 
 // k8sCreateCmd represents the create command
@@ -44,6 +45,15 @@ var k8sCreateNamespaceCmd = &cobra.Command{
 	Short: "Create a namespace",
 	PreRun: func(cmd *cobra.Command, args []string) {
 			f = k8s.CreateNamespace
+	},
+	Run: runK8s,
+}
+
+var k8sCreatePodCmd = &cobra.Command{
+	Use: "pod",
+	Short: "Create a Pod",
+	PreRun: func(cmd *cobra.Command, args []string) {
+		f = k8s.CreatePod
 	},
 	Run: runK8s,
 }
@@ -81,6 +91,15 @@ var k8sDeleteNamespaceCmd = &cobra.Command{
 	Run: runK8s,
 }
 
+var k8sDeletePodCmd = &cobra.Command{
+	Use: "Pod",
+	Short: "Delete a Pod",
+	PreRun:func(cmd *cobra.Command, args []string) {
+		f = k8s.DeletePod
+	},
+	Run: runK8s,
+}
+
 var k8sDeleteDaemonsetsCmd = &cobra.Command{
 	Use:   "daemonsets",
 	Short: "Create deamonsets",
@@ -101,20 +120,19 @@ var k8sDeleteDeploymentCmd = &cobra.Command{
 
 func init() {
 	RootCmd.AddCommand(k8sCmd)
-	k8sCmd.Flags().StringVar(&master, "master", "", "The address:port of the Kubernetes server")
-	k8sCmd.Flags().StringVar(&configPath, "config", "", "Path to the kubeconfig file")
-	k8sCmd.Flags().StringArrayVar(&endpoints, "endpoint", []string{}, "machine addresses in the etcd cluster")
+	k8sCmd.PersistentFlags().StringVar(&master, "master", "", "The address:port of the Kubernetes server")
+	k8sCmd.PersistentFlags().StringVar(&configPath, "config", "", "Path to the kubeconfig file")
+	k8sCmd.PersistentFlags().StringArrayVar(&endpoints, "endpoint", []string{}, "machine addresses in the etcd cluster")
 	k8sCmd.PersistentFlags().StringVar(&key, "key", "", "The key of etcd")
-	k8sCmd.PersistentFlags().StringArrayVar(&env, "env", []string{}, "The variables to replace")
 	k8sCmd.AddCommand(k8sCreateCmd, k8sDeleteCmd)
 
-	k8sCreateCmd.AddCommand(k8sCreateNamespaceCmd, k8sCreateDaemonsetsCmd, k8sCreateDeploymentCmd)
+	k8sCreateCmd.AddCommand(k8sCreateNamespaceCmd, k8sCreatePodCmd, k8sCreateDaemonsetsCmd, k8sCreateDeploymentCmd)
 
-	k8sDeleteCmd.AddCommand(k8sDeleteNamespaceCmd, k8sDeleteDaemonsetsCmd, k8sDeleteDeploymentCmd)
+	k8sDeleteCmd.AddCommand(k8sDeleteNamespaceCmd, k8sDeletePodCmd, k8sDeleteDaemonsetsCmd, k8sDeleteDeploymentCmd)
 }
 
-func checkK8s(cmd *cobra.Command, args []string) {
-	checkEnv(ENV_WORKFLOW_ID)
+func checkK8sCmd(cmd *cobra.Command, args []string) {
+	id = checkEnv(ENV_CO_RUN_ID)
 	if master == "" {
 		log.Fatalln("Must specify the kubernetes master")
 	}
@@ -128,21 +146,21 @@ func checkK8s(cmd *cobra.Command, args []string) {
 
 func k8sResourceData() ([]byte, error) {
 	value := etcd.Get(endpoints, id, key)
-	actorMap := make(map[string]string)
-	for _, item := range env {
+	envMap := make(map[string]string)
+	for _, item := range os.Environ() {
 		slice := strings.Split(item, "=")
-		if len(slice) < 2 {
+		if len(slice) != 2 {
 			log.Printf("Failed to get env data[%s]", item)
 			continue
 		}
-		actorMap[slice[0]] = slice[1]
+		envMap[slice[0]] = slice[1]
 	}
 	t, err := template.New("resource").Parse(value)
 	if err != nil {
 		return nil, err
 	}
 	buf := new(bytes.Buffer)
-	if err := t.Execute(buf, actorMap); err != nil {
+	if err := t.Execute(buf, envMap); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
