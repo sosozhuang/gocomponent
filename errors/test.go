@@ -27,28 +27,42 @@ const (
 	Running
 	Finished
 	Failed
+	Cancelled
 )
 
 type WorkflowModel struct {
 	Name  string
 	Url   string
 	Token string
-	Status int8
+
+}
+
+type WorkflowLogModel struct {
+	
 }
 
 type Workflow struct {
 	*WorkflowModel
+	log *WorkflowLogModel
 	executeID int64
+	Status int8
 	Stages []StageInterface
 }
 
 type Executor interface {
+	Name() string
 	Execute() error
+	setID() (int64, error)
+}
+
+type xx interface {
+	Name() string
 	setID() (int64, error)
 }
 
 type WorkflowInterface interface {
 	Executor
+	xx
 	next() []*Workflow
 	History() error
 }
@@ -59,6 +73,10 @@ func (workflow *Workflow) next() []*Workflow {
 
 func (workflow *Workflow) save() error {
 	return nil
+}
+
+func (workflow *Workflow) Name() string {
+	return workflow.WorkflowModel.Name
 }
 
 func (workflow *Workflow) setID() (int64, error) {
@@ -76,7 +94,8 @@ func (workflow *Workflow) setID() (int64, error) {
 func (workflow *Workflow) Execute() error {
 	_, err := workflow.setID()
 	if err != nil {
-		log.Printf("Workflow[%s] fetch next id failed, reason: %s\n", err)
+		log.Printf("Workflow[%s] fetch id failed, reason: %s\n",
+			workflow.Name(), err)
 		workflow.Status = Failed
 		workflow.save()
 		return err
@@ -84,18 +103,22 @@ func (workflow *Workflow) Execute() error {
 	workflow.Status = Running
 	workflow.save()
 	for _, stage := range workflow.Stages {
+		log.Printf("Workflow[%s][%d] stage[%s] will start executing\n",
+			workflow.Name(), workflow.executeID, stage.Name())
 		if err = stage.Execute(); err != nil {
-			log.Printf("Workflow[%s] execution failed, reason: %s\n", err)
+			log.Printf("Workflow[%s][%d] failed, reason: %s\n",
+				workflow.Name(), workflow.executeID, err)
 			workflow.Status = Failed
 			workflow.save()
 			return err
 		}
 	}
-	log.Printf("Workflow[%s] execution finished\n", workflow.Name)
+	log.Printf("Workflow[%s][%d] finished\n", workflow.Name(), workflow.executeID)
 	workflow.Status = Finished
 	workflow.save()
 	for _, w := range workflow.next() {
-		log.Printf("Workflow[%s] will start executing, triggered by workflow[%s]\n", w.Name, workflow.Name)
+		log.Printf("Workflow[%s] will start executing, triggered by workflow[%s][%d]\n",
+			w.Name(), workflow.Name(), workflow.executeID)
 		go w.Execute()
 	}
 	return nil
@@ -104,13 +127,18 @@ func (workflow *Workflow) Execute() error {
 type StageModel struct {
 	Name    string
 	Timeout int64
-	Status int8
+}
+
+type StageLogModel struct {
+	
 }
 
 type Stage struct {
 	*StageModel
+	log *StageLogModel
 	executeID int64
-	*Workflow
+	Status int8
+	//*Workflow
 	wg      sync.WaitGroup
 	tokens  []chan struct{}
 	Actions []ActionInterface
@@ -118,6 +146,14 @@ type Stage struct {
 
 type StageInterface interface {
 	Executor
+}
+
+func (stage *Stage) save() error {
+	return nil
+}
+
+func (stage *Stage) Name() string {
+	return stage.StageModel.Name
 }
 
 func (stage *Stage) setID() (int64, error) {
@@ -133,8 +169,18 @@ func (stage *Stage) setID() (int64, error) {
 }
 
 func (stage *Stage) Execute() error {
-	log.Printf("Workflow[%s] stage[%s] will start executing\n",
-		stage.Workflow.Name, stage.Name)
+	//log.Printf("Workflow[%s] stage[%s] will start executing\n",
+	//	stage.Workflow.Name, stage.Name)
+	_, err := stage.setID()
+	if err != nil {
+		log.Printf("Stage[%s] fetch id failed, reason: %s\n", stage.Name(), err)
+		stage.Status = Failed
+		stage.save()
+		return err
+	}
+	stage.Status = Running
+	stage.save()
+
 	done := make(chan struct{})
 	actionResp := make(chan *Response)
 	go func() {
@@ -144,6 +190,8 @@ func (stage *Stage) Execute() error {
 	}()
 	for _, action := range stage.Actions {
 		stage.wg.Add(1)
+		log.Printf("Stage[%s][%d] action[%s] will start executing\n",
+			stage.Name(), stage.executeID, action.Name())
 		go action.Execute(done, actionResp)
 	}
 	if stage.Timeout > 0 {
@@ -151,11 +199,17 @@ func (stage *Stage) Execute() error {
 		for {
 			select {
 			case <-done:
-				log.Printf("Workflow[%s] Stage[%s] executed\n",
-					stage.Workflow.Name, stage.Name)
+				log.Printf("Stage[%s][%d] finished\n",
+					stage.Name(), stage.executeID)
+				stage.Status = Finished
+				stage.save()
 				return nil
 			case response, ok := <-actionResp:
 				if !ok {
+					log.Printf("Stage[%s][%d] finished\n",
+						stage.Name(), stage.executeID)
+					stage.Status = Finished
+					stage.save()
 					return nil
 				}
 				if !response.OK {
@@ -163,25 +217,40 @@ func (stage *Stage) Execute() error {
 						for range actionResp {
 						}
 					}()
-					return response.Err
+					log.Printf("Stage[%s][%d] failed, reason: %s\n",
+						stage.Name, stage.executeID, response.Err)
+					stage.Status = Failed
+					stage.save()
+					return fmt.Errorf("Stage[%s][%d] failed, reason: %s",
+						stage.Name, stage.executeID, response.Err)
 				}
 			case <-tick:
 				go func() {
 					for range actionResp {
 					}
 				}()
-				log.Printf("Workflow[%s] stage[%s] time out after %d seconds\n",
-					stage.Workflow.Name, stage.Name, stage.Timeout)
-				return fmt.Errorf("Stage[%s] time out", stage.Name)
+				log.Printf("stage[%s] time out after %d seconds\n",
+					stage.Name, stage.Timeout)
+				stage.Status = Failed
+				stage.save()
+				return fmt.Errorf("Stage[%s][%d] time out", stage.Name(), stage.executeID)
 			}
 		}
 	} else {
 		for {
 			select {
 			case <-done:
+				log.Printf("Stage[%s][%d] finished\n",
+					stage.Name(), stage.executeID)
+				stage.Status = Finished
+				stage.save()
 				return nil
 			case response, ok := <-actionResp:
 				if !ok {
+					log.Printf("Stage[%s][%d] finished\n",
+						stage.Name(), stage.executeID)
+					stage.Status = Finished
+					stage.save()
 					return nil
 				}
 				if !response.OK {
@@ -189,7 +258,12 @@ func (stage *Stage) Execute() error {
 						for range actionResp {
 						}
 					}()
-					return response.Err
+					log.Printf("Stage[%s][%d] failed, reason: %s\n",
+						stage.Name, stage.executeID, response.Err)
+					stage.Status = Failed
+					stage.save()
+					return fmt.Errorf("Stage[%s][%d] failed, reason: %s",
+						stage.Name, stage.executeID, response.Err)
 				}
 			}
 		}
@@ -203,15 +277,15 @@ type ActionModel struct {
 }
 
 type Action struct {
-	EID int64
 	*ActionModel
-	*Workflow
-	*Stage
+	executeID int64
+	Status int8
 	Component
 	Inputs []*Link
 }
 
 type ActionInterface interface {
+	Name() string
 	Execute(chan<- struct{}, chan<- *Response)
 	Input() (interface{}, error)
 	Output() (interface{}, error)
@@ -224,48 +298,92 @@ func cancelled(done <-chan struct{}) bool {
 		return false
 	}
 }
+
+func (action *Action) Name() string {
+	return action.ActionModel.Name
+}
+
+func (action *Action) setID() (int64, error) {
+	if action.executeID <= 0 {
+		//TODO: if return error, id is zero, table index is a problem
+		if id, err := model.NextValue("action"); err != nil {
+			return nil, err
+		} else {
+			action.executeID = id
+		}
+	}
+	return action.executeID, nil
+}
+
+func (action *Action) save() error {
+	return nil
+}
+
 func (action *Action) Execute(done <-chan struct{}, actionResp chan<- *Response) {
-	log.Printf("Workflow[%s] stage[%s] action[%s] will start executing\n",
-		action.Workflow.Name, action.Stage.Name, action.Name)
+	//log.Printf("Workflow[%s] stage[%s] action[%s][%d] will start executing\n",
+	//	action.Workflow.Name, action.Stage.Name, action.Name, action.executeID)
+	_, err := action.setID()
+	if err != nil {
+		log.Printf("Action[%s] fetch id failed, reason: %s\n", action.Name(), err)
+		action.Status = Failed
+		action.save()
+		return err
+	}
+
 	defer action.Stage.wg.Done()
 	//TODO: add concurrency limit
 	select {
 	case <-done:
-		log.Printf("Workflow[%s] stage[%s] cancelled, action[%s] return directly\n",
-			action.Workflow.Name, action.Stage.Name, action.Name)
+		log.Printf("Stage cancelled, action[%s][%d] return directly\n",
+			action.Name(), action.executeID)
+		action.Status = Cancelled
+		action.save()
 		return
 	case action.Stage.tokens <- struct{}{}:
 	}
 	defer func() { <-action.Stage.tokens }()
 
+	action.Status = Running
+	action.save()
+
 	raw := []byte(action.Template)
-	var err error
 	for _, input := range action.Inputs {
 		raw, err = input.MapData(action.EID, raw)
 		if err != nil {
-			log.Printf("Workflow[%s] stage[%s] action[%s] mapped data error, reason: %s\n",
-				action.Workflow.Name, action.Stage.Name, action.Name, err)
+			log.Printf("Action[%s][%d] mapped data error, reason: %s\n",
+				 action.Name(), action.executeID, err)
 		}
 	}
 	componentResp := make(chan *Response)
+	log.Printf("Action[%s][%d] component[%s] will start executing\n",
+		action.Name(), action.executeID, action.Component.Name)
 	go action.Component.Start(componentResp)
+	var response Response
 	if action.Timeout > 0 {
 		select {
-		case response := <-componentResp:
-			log.Printf("Workflow[%s] stage[%s] action[%s] response: %s\n",
-				action.Workflow.Name, action.Stage.Name, action.Name, response)
-			actionResp <- response
+		case response = <-componentResp:
+			log.Printf("Action[%s][%d] response: %s\n",
+				 action.Name, action.executeID, response)
+			actionResp <- &response
 		case <-time.After(time.Duration(action.Timeout) * time.Second):
-			log.Printf("Workflow[%s] stage[%s] action[%s] time out after %d seconds\n",
-				action.Workflow.Name, action.Stage.Name, action.Timeout)
-			actionResp <- &Response{OK: false, Err: fmt.Errorf("Action[%s] time out", action.Name)}
+			log.Printf("Action[%s][%d] time out after %d seconds\n",
+				action.Name(), action.executeID, action.Timeout)
+			response.OK = false
+			response.Err = fmt.Errorf("Action[%s][%d] time out", action.Name, action.executeID)
+			actionResp <- &response
 		}
 	} else {
-		response := <-componentResp
-		log.Printf("Workflow[%s] stage[%s] action[%s] response: %s\n",
-			action.Workflow.Name, action.Stage.Name, action.Name, response)
+		response = <-componentResp
+		log.Printf("Action[%s][%d] response: %s\n",
+			 action.Name, action.executeID, response)
 		actionResp <- response
 	}
+	if response.OK {
+		action.Status = Finished
+	} else {
+		action.Status = Failed
+	}
+	action.save()
 }
 
 func (action *Action) GetData(id int64) string {
@@ -288,9 +406,9 @@ type ComponentModel struct {
 
 type K8sComponent struct {
 	*ComponentModel
-	*Workflow
-	*Stage
-	*Action
+	//*Workflow
+	//*Stage
+	//*Action
 	ExitCode string
 }
 
@@ -298,8 +416,6 @@ type MesosComponent struct {
 }
 
 func (component *K8sComponent) Start(componentResp chan<- *Response) {
-	log.Printf("Workflow[%s] stage[%s] action[%s] component[%s] will start executing\n",
-		component.Workflow.Name, component.Stage.Name, component.Action.Name, component.Name)
 	time.Sleep(10 * time.Second)
 	var response *Response
 	if component.ExitCode == "0" {
@@ -388,4 +504,42 @@ func (link *Link) MapData(id int64, raw []byte) ([]byte, error) {
 }
 
 func main() {
+}
+
+
+
+package model
+
+import (
+	"github.com/jinzhu/gorm"
+)
+
+var db *gorm.DB
+
+type Sequence struct {
+	Seqname   string `gorm:"column:seqname;primary_key;type:varchar(50)"`
+	Current   int64  `gorm:"column:current;not null;type:bigint;default:1"`
+	Increment int64  `gorm:"column:increment;not null;type:int;default:1"`
+}
+
+func (seq *Sequence) TableName() string {
+	return "sequence"
+}
+
+func CurrentValue(seqname string) (int64, error) {
+	return rawSql("SELECT currval(?)", seqname)
+}
+
+func NextValue(seqname string) (int64, error) {
+	return rawSql("SELECT nextval(?)", seqname)
+}
+
+func rawSql(sql, seqname string) (int64, error) {
+	var value int64
+	if err := db.Raw(sql, seqname).
+		Row().Scan(&value); err != nil {
+		return 0, err
+	} else {
+		return value, nil
+	}
 }
