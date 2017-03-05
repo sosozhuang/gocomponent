@@ -2,7 +2,8 @@
 A go component for workflow
 
 ## Project Info
-Gocomponent contains several frequency used tools in workflow, including:
-* build docker image in component
-* manipulate kubernetes resource
-* set/delete key-value in etcd
+Component contains several functions, including:
+* manipulate component definition
+* execute/debug/stop a component
+* send event from an execution to executor
+* build tar archive for docker image
